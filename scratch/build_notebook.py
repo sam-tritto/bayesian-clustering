@@ -162,12 +162,68 @@ from sklearn.decomposition import PCA
 from yellowbrick.cluster import KElbowVisualizer
 from sklearn.metrics import v_measure_score, adjusted_rand_score
 
-# Fit 12D PCA on the normalized 384D sentence embeddings for direct comparison with 12D UMAP
+
+def fit_pca_by_variance(
+    X: np.ndarray,
+    target_variance: float = 0.95,
+    strict_upper_bound: bool = False,
+    random_state: int = RANDOM_SEED,
+):
+    \"\"\"Fit PCA and select the number of components to hit a target cumulative explained variance.
+
+    Args:
+        X: Input feature matrix of shape (N, D).
+        target_variance: Desired cumulative explained variance ratio (e.g., 0.95 for 95%).
+        strict_upper_bound:
+            - If False (default): returns the minimum number of components explaining at least
+              the target variance (cum_var >= target_variance).
+            - If True: returns the maximum number of components that do not exceed
+              the target variance (cum_var <= target_variance).
+        random_state: Random seed for reproducibility.
+
+    Returns:
+        Tuple of (fitted_pca_model, transformed_embeddings, n_components, achieved_variance).
+    \"\"\"
+    pca_full = PCA(random_state=random_state).fit(X)
+    cum_var = np.cumsum(pca_full.explained_variance_ratio_)
+
+    if strict_upper_bound:
+        # Maximum number of components where cumulative variance <= target_variance
+        valid_indices = np.where(cum_var <= target_variance)[0]
+        n_comps = int(valid_indices[-1] + 1) if len(valid_indices) > 0 else 1
+    else:
+        # Minimum number of components to explain at least target_variance
+        n_comps = int(np.searchsorted(cum_var, target_variance) + 1)
+
+    achieved_var = float(cum_var[n_comps - 1])
+    transformed = pca_full.transform(X)[:, :n_comps]
+
+    # Package into a configured PCA estimator
+    pca_model = PCA(n_components=n_comps, random_state=random_state)
+    pca_model.components_ = pca_full.components_[:n_comps]
+    pca_model.explained_variance_ = pca_full.explained_variance_[:n_comps]
+    pca_model.explained_variance_ratio_ = pca_full.explained_variance_ratio_[:n_comps]
+    pca_model.mean_ = pca_full.mean_
+
+    print(f"[PCA by Variance] Target: {target_variance:.1%} | Selected: {n_comps} components | Achieved: {achieved_var:.2%}")
+    return pca_model, transformed, n_comps, achieved_var
+
+
+# Example 1: Target 95% variance (returns maximum components <= 95% if strict_upper_bound=True)
+pca_95, pca_95_embeddings, k_95, var_95 = fit_pca_by_variance(
+    embeddings,
+    target_variance=0.95,
+    strict_upper_bound=True,
+    random_state=RANDOM_SEED,
+)
+
+# Example 2: For low-dimensional clustering comparison with 12D UMAP, we use 12 components
 pca = PCA(n_components=12, random_state=RANDOM_SEED)
 pca_embeddings = pca.fit_transform(embeddings)
 
-print(f"PCA shape: {pca_embeddings.shape} (Total variance explained: {pca.explained_variance_ratio_.sum():.2%})")
-print(f"UMAP shape: {umap_embeddings.shape}")
+print(f"PCA (95% variance) shape: {pca_95_embeddings.shape} -> {var_95:.2%} variance")
+print(f"PCA (12D baseline) shape: {pca_embeddings.shape} -> {pca.explained_variance_ratio_.sum():.2%} variance")
+print(f"UMAP (12D manifold) shape: {umap_embeddings.shape}")
 """))
 
 cells.append(nbf.v4.new_code_cell("""# -------------------------------------------------------------------------
@@ -216,6 +272,37 @@ print(f"--> UMAP Yellowbrick Result: k = {k_best_umap} | Leaf V-Measure: {umap_y
 """))
 
 cells.append(nbf.v4.new_code_cell("""# -------------------------------------------------------------------------
+# Visualize UMAP Yellowbrick Clusters vs. Ground Truth Subcategories
+# -------------------------------------------------------------------------
+fig, axes = plt.subplots(1, 2, figsize=(18, 6))
+
+# Left: Discovered Yellowbrick Clusters on UMAP 2D coordinates
+scatter_u = axes[0].scatter(
+    umap_2d[:, 0], umap_2d[:, 1],
+    c=km_umap.labels_, cmap="tab10", alpha=0.6, s=15
+)
+axes[0].set_title(f"UMAP Yellowbrick Selected Clusters (k = {k_best_umap})", fontsize=13, fontweight="bold")
+axes[0].set_xlabel("UMAP 1")
+axes[0].set_ylabel("UMAP 2")
+handles_u, _ = scatter_u.legend_elements()
+axes[0].legend(handles_u, [f"Cluster {i}" for i in range(k_best_umap)], title="Discovered Cluster", loc="best")
+
+# Right: Ground Truth 9 Subcategories
+scatter_gt = axes[1].scatter(
+    umap_2d[:, 0], umap_2d[:, 1],
+    c=fine_labels, cmap="tab20", alpha=0.6, s=15
+)
+axes[1].set_title("Ground Truth Subcategories (9 Leaf Topics)", fontsize=13, fontweight="bold")
+axes[1].set_xlabel("UMAP 1")
+axes[1].set_ylabel("UMAP 2")
+handles_gt, _ = scatter_gt.legend_elements()
+axes[1].legend(handles_gt, fine_names, bbox_to_anchor=(1.02, 1), loc="upper left", title="Subcategory")
+
+plt.tight_layout()
+plt.show()
+"""))
+
+cells.append(nbf.v4.new_code_cell("""# -------------------------------------------------------------------------
 # PCA Workflow: Pass 1 (Distortion Elbow) & Pass 2 (Local Silhouette Sweep)
 # -------------------------------------------------------------------------
 fig, axes = plt.subplots(1, 2, figsize=(18, 5))
@@ -258,6 +345,37 @@ km_pca = KMeans(n_clusters=k_best_pca, random_state=RANDOM_SEED, n_init=10).fit(
 pca_yb_v = v_measure_score(fine_labels, km_pca.labels_)
 pca_yb_ari = adjusted_rand_score(fine_labels, km_pca.labels_)
 print(f"--> PCA Yellowbrick Result: k = {k_best_pca} | Leaf V-Measure: {pca_yb_v:.4f} | ARI: {pca_yb_ari:.4f}")
+"""))
+
+cells.append(nbf.v4.new_code_cell("""# -------------------------------------------------------------------------
+# Visualize PCA Yellowbrick Clusters vs. Ground Truth (PC1 vs. PC2)
+# -------------------------------------------------------------------------
+fig, axes = plt.subplots(1, 2, figsize=(18, 6))
+
+# Left: Discovered Yellowbrick Clusters on top 2 Principal Components
+scatter_p = axes[0].scatter(
+    pca_embeddings[:, 0], pca_embeddings[:, 1],
+    c=km_pca.labels_, cmap="tab10", alpha=0.6, s=15
+)
+axes[0].set_title(f"PCA Yellowbrick Selected Clusters (k = {k_best_pca}) on PC1 vs PC2", fontsize=13, fontweight="bold")
+axes[0].set_xlabel(f"Principal Component 1 ({pca.explained_variance_ratio_[0]:.1%} var)")
+axes[0].set_ylabel(f"Principal Component 2 ({pca.explained_variance_ratio_[1]:.1%} var)")
+handles_p, _ = scatter_p.legend_elements()
+axes[0].legend(handles_p, [f"Cluster {i}" for i in range(k_best_pca)], title="Discovered Cluster", loc="best")
+
+# Right: Ground Truth 9 Subcategories on PC1 vs PC2
+scatter_gt_p = axes[1].scatter(
+    pca_embeddings[:, 0], pca_embeddings[:, 1],
+    c=fine_labels, cmap="tab20", alpha=0.6, s=15
+)
+axes[1].set_title("Ground Truth Subcategories on PC1 vs PC2", fontsize=13, fontweight="bold")
+axes[1].set_xlabel(f"Principal Component 1 ({pca.explained_variance_ratio_[0]:.1%} var)")
+axes[1].set_ylabel(f"Principal Component 2 ({pca.explained_variance_ratio_[1]:.1%} var)")
+handles_gt_p, _ = scatter_gt_p.legend_elements()
+axes[1].legend(handles_gt_p, fine_names, bbox_to_anchor=(1.02, 1), loc="upper left", title="Subcategory")
+
+plt.tight_layout()
+plt.show()
 """))
 
 cells.append(nbf.v4.new_markdown_cell("""### Summary of the Yellowbrick Heuristic Approach
