@@ -18,4 +18,5 @@ dependencies = [
     "sentence-transformers>=6.0.1",
     "tomotopy>=0.14.0",
     "umap-learn>=0.5.12",
+    "yellowbrick>=1.5",
 ]
