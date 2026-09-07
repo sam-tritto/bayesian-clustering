@@ -104,8 +104,10 @@ def build_pymc_dpgmm_model(
 
 def fit_dpgmm_advi(
     model: pm.Model,
+    X: np.ndarray,
     n_iterations: int = 2500,
     draws: int = 500,
+    use_kmeans_init: bool = True,
     random_seed: int = 42,
 ) -> Tuple[az.InferenceData, np.ndarray]:
     """Fit DP-GMM using Automatic Differentiation Variational Inference (ADVI).
@@ -115,21 +117,35 @@ def fit_dpgmm_advi(
           and non-identifiable permutation modes, causing poor mixing across chains.
         - ADVI fits a mean-field variational approximation to the posterior in seconds,
           providing smooth convergence and stable posterior point estimates.
+        - Initializing component centroids with KMeans centers (as in scikit-learn's DP-GMM)
+          breaks symmetry between the K components, preventing all components from collapsing
+          to the global empirical mean.
 
     Args:
         model: Configured PyMC model.
+        X: Feature matrix of shape (N, D).
         n_iterations: Optimization steps for the Evidence Lower Bound (ELBO).
         draws: Number of posterior draws to sample from the fitted approximation.
+        use_kmeans_init: Whether to initialize centroid variational means with KMeans centers.
         random_seed: Random seed for reproducibility.
 
     Returns:
         Tuple of (InferenceData trace, ELBO history array).
     """
+    start = None
+    if use_kmeans_init:
+        from sklearn.cluster import KMeans
+        K = default_config.truncation_k
+        logger.info("Initializing ADVI component centroids using KMeans (K=%d)...", K)
+        kmeans = KMeans(n_clusters=K, n_init=1, random_state=random_seed).fit(X)
+        start = {"mu": kmeans.cluster_centers_}
+
     logger.info("Fitting PyMC DP-GMM with ADVI (%d iterations)...", n_iterations)
     with model:
         approx = pm.fit(
             n=n_iterations,
             method="advi",
+            start=start,
             random_seed=random_seed,
             progressbar=True,
         )
@@ -324,8 +340,10 @@ def run_phase_3(
     # 3. Fit with ADVI
     trace, elbo_history = fit_dpgmm_advi(
         model=model,
+        X=umap_embeddings,
         n_iterations=advi_iterations,
         draws=500,
+        use_kmeans_init=True,
         random_seed=config.random_seed,
     )
 
